@@ -119,6 +119,12 @@ type Upgrade struct {
 	EnableDNS bool
 	// TakeOwnership will skip the check for helm annotations and adopt all existing resources.
 	TakeOwnership bool
+	// Duration of time to wait for pre-upgrade hooks to complete
+    PreUpgradeTimeout time.Duration
+	// Duration of time to wait for upgrade to complete
+	UpgradeTimeout time.Duration
+	// PostUpgradeTimeout time.Duration
+	PostUpgradeTimeout time.Duration
 }
 
 type resultMessage struct {
@@ -418,14 +424,29 @@ func (u *Upgrade) handleContext(ctx context.Context, done chan interface{}, c ch
 }
 func (u *Upgrade) releasingUpgrade(c chan<- resultMessage, upgradedRelease *release.Release, current kube.ResourceList, target kube.ResourceList, originalRelease *release.Release) {
 	// pre-upgrade hooks
+	
+	// If the user has set a pre-upgrade timeout, use that. Otherwise, use the
+	// timeout set for the upgrade.
+    preUpgradeTimeout := u.PreUpgradeTimeout
+	if preUpgradeTimeout == 0 {
+    	preUpgradeTimeout = u.Timeout // fallback to single timeout
+	}
+
 
 	if !u.DisableHooks {
-		if err := u.cfg.execHook(upgradedRelease, release.HookPreUpgrade, u.WaitStrategy, u.Timeout); err != nil {
+		if err := u.cfg.execHook(upgradedRelease, release.HookPreUpgrade, u.WaitStrategy, preUpgradeTimeout); err != nil {
 			u.reportToPerformUpgrade(c, upgradedRelease, kube.ResourceList{}, fmt.Errorf("pre-upgrade hooks failed: %s", err))
 			return
 		}
 	} else {
 		u.cfg.Log("upgrade hooks disabled for %s", upgradedRelease.Name)
+	}
+
+	// If the user has set a pre-upgrade timeout, use that. Otherwise, use the
+	// timeout set for the upgrade.
+	upgradeTimeout := u.UpgradeTimeout
+	if upgradeTimeout == 0 {
+    	upgradeTimeout = u.Timeout // fallback to single timeout
 	}
 
 	results, err := u.cfg.KubeClient.Update(current, target, u.Force)
@@ -451,22 +472,29 @@ func (u *Upgrade) releasingUpgrade(c chan<- resultMessage, upgradedRelease *rele
 		return
 	}
 	if u.WaitForJobs {
-		if err := waiter.WaitWithJobs(target, u.Timeout); err != nil {
+		if err := waiter.WaitWithJobs(target, upgradeTimeout); err != nil {
 			u.cfg.recordRelease(originalRelease)
 			u.reportToPerformUpgrade(c, upgradedRelease, results.Created, err)
 			return
 		}
 	} else {
-		if err := waiter.Wait(target, u.Timeout); err != nil {
+		if err := waiter.Wait(target, upgradeTimeout); err != nil {
 			u.cfg.recordRelease(originalRelease)
 			u.reportToPerformUpgrade(c, upgradedRelease, results.Created, err)
 			return
 		}
 	}
 
+	// If the user has set a post-upgrade timeout, use that. Otherwise, use the
+	// timeout set for the upgrade.
+	postUpgradeTimeout := u.PostUpgradeTimeout
+	if postUpgradeTimeout == 0 {
+    	postUpgradeTimeout = u.Timeout // fallback to single timeout
+	}
+
 	// post-upgrade hooks
 	if !u.DisableHooks {
-		if err := u.cfg.execHook(upgradedRelease, release.HookPostUpgrade, u.WaitStrategy, u.Timeout); err != nil {
+		if err := u.cfg.execHook(upgradedRelease, release.HookPostUpgrade, u.WaitStrategy, postUpgradeTimeout); err != nil {
 			u.reportToPerformUpgrade(c, upgradedRelease, results.Created, fmt.Errorf("post-upgrade hooks failed: %s", err))
 			return
 		}
